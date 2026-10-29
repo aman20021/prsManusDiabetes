@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: manas
+      POSTGRES_PASSWORD: manas
+      POSTGRES_DB: manas_inference
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U manas -d manas_inference"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://manas:manas@postgres:5432/manas_inference
+      JWT_SECRET: amanSharma123
+      CORS_ORIGINS: http://localhost:8080
+      CLINICIAN_PASSWORD: clinician123
+      MLOPS_PASSWORD: mlops123
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.db
+backend/test.db
+node_modules/
+frontend/dist/
+.DS_Store
+*.egg-info/
+.pytest_cache/
+backend/models/artifacts/*.joblib
+backend/models/artifacts/*.keras
