@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv*/
 venv/
 .env
 *.db
@@ -12,3 +13,10 @@ frontend/dist/
 .pytest_cache/
 backend/models/artifacts/*.joblib
 backend/models/artifacts/*.keras
+backend/.venv/
+backend/app/.venv/
+backend/app/models/.venv/
+backend/app/models/artifacts/.venv/
+backend/app/models/artifacts/*.joblib
+backend/app/models/artifacts/*.keras
+backend/app/models/artifacts/*.joblib

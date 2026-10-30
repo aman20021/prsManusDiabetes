@@ -1,4 +1,4 @@
-import { Link, Navigate, Route, Routes } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import BatchPage from "./pages/BatchPage";
 import DashboardPage from "./pages/DashboardPage";
@@ -7,6 +7,7 @@ import ModelsPage from "./pages/ModelsPage";
 import PredictPage from "./pages/PredictPage";
 import UploadDetailPage from "./pages/UploadDetailPage";
 import UploadsPage from "./pages/UploadsPage";
+import UsersPage from "./pages/UsersPage";
 
 function Shell({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuth();
@@ -15,11 +16,14 @@ function Shell({ children }: { children: React.ReactNode }) {
       <header>
         <strong>MANAS Inference</strong>
         <nav>
-          <Link to="/">Dashboard</Link>
-          <Link to="/predict">Single</Link>
-          <Link to="/batch">Batch</Link>
-          <Link to="/uploads">Uploads</Link>
-          {user?.role === "mlops" && <Link to="/models">Models</Link>}
+          <NavLink to="/" end>
+            Dashboard
+          </NavLink>
+          <NavLink to="/predict">Single</NavLink>
+          <NavLink to="/batch">Batch</NavLink>
+          <NavLink to="/uploads">Uploads</NavLink>
+          {user?.role === "mlops" && <NavLink to="/models">Models</NavLink>}
+          {user?.role === "mlops" && <NavLink to="/people">People</NavLink>}
         </nav>
         <span className="user">
           {user?.username} ({user?.role}){" "}
@@ -89,6 +93,14 @@ export default function App() {
         element={
           <PrivateRoute>
             <ModelsPage />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/people"
+        element={
+          <PrivateRoute>
+            <UsersPage />
           </PrivateRoute>
         }
       />

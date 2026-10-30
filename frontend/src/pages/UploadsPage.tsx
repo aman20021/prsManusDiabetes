@@ -44,7 +44,13 @@ export default function UploadsPage() {
                   <Link to={`/uploads/${u.id}`}>{u.id}</Link>
                 </td>
                 <td>{u.upload_type}</td>
-                <td>{u.filename ?? "—"}</td>
+                <td>
+                  {u.filename ? (
+                    <Link to={`/uploads/${u.id}`}>{u.filename}</Link>
+                  ) : (
+                    "—"
+                  )}
+                </td>
                 <td>{u.row_count}</td>
                 <td>{u.created_at?.slice(0, 19)}</td>
               </tr>

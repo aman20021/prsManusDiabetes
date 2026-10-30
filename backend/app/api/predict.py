@@ -4,10 +4,9 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
-from pydantic import BaseModel, Field
 
 from app.api.deps import DbDep, get_current_user
-from app.db.models import InferenceLog, ModelVersion, User
+from app.db.models import ModelVersion, User
 from app.db.seed import get_active_model_version
 from app.exceptions import AppError
 from app.services.hashing import hash_bytes
@@ -21,7 +20,6 @@ from app.services.logging_service import (
 from app.services.registry import registry
 from app.services.validation import (
     ValidationException,
-    parse_json_body,
     validate_batch_csv,
     validate_batch_json,
     validate_single_payload,
@@ -30,25 +28,170 @@ from app.services.validation import (
 router = APIRouter(prefix="/predict", tags=["predict"])
 
 
-class PredictQuery(BaseModel):
-    model_version: str | None = None
+def _resolve_model(db: DbDep, version: str | None) -> ModelVersion:
+    """Pick one model and prove its weights are loaded before any prediction is stored.
 
-
-def _resolve_model_version(db: DbDep, version: str | None) -> tuple[str, ModelVersion]:
+    An explicit model_version must already be registered. With no version, the
+    production row is used. The in-memory adapter for that same version is what
+    will run, so the response cannot name a different artifact than the one scored.
+    """
     if version:
         mv = db.query(ModelVersion).filter_by(version=version).first()
         if not mv:
             raise AppError(404, "MODEL_NOT_FOUND", f"Model version {version} is not registered", [])
-        return version, mv
-    active = get_active_model_version(db)
-    if not active:
-        raise AppError(503, "MODEL_UNAVAILABLE", "No production model is configured", [])
-    return active.version, active
+    else:
+        mv = get_active_model_version(db)
+        if not mv:
+            raise AppError(503, "MODEL_UNAVAILABLE", "No production model is configured", [])
+    registry.ensure_ready(mv.version)
+    return mv
 
 
-def _artifact_sha(db: DbDep, version: str) -> str | None:
-    mv = db.query(ModelVersion).filter_by(version=version).first()
-    return mv.artifact_sha256 if mv else None
+def _persist_failure(
+    db: DbDep,
+    *,
+    request_id: str,
+    user_id: int,
+    upload_type: str,
+    row_count: int,
+    filename: str | None,
+    content_hash: str | None,
+    model_version: str | None,
+    error_code: str,
+    error_message: str,
+) -> None:
+    upload = create_upload(
+        db,
+        user_id,
+        upload_type,
+        row_count,
+        filename=filename,
+        content_sha256=content_hash,
+        status="failed",
+    )
+    db.commit()
+    log_inference_error(
+        db,
+        request_id=request_id,
+        user_id=user_id,
+        upload_id=upload.id,
+        upload_type=upload_type,
+        error_code=error_code,
+        error_message=error_message,
+        model_version=model_version,
+    )
+
+
+def _run(
+    db: DbDep,
+    user: User,
+    records: list[dict],
+    upload_type: str,
+    model_version: str | None,
+    filename: str | None = None,
+    content_hash: str | None = None,
+) -> tuple[list[dict], dict, int]:
+    request_id = str(uuid.uuid4())
+    try:
+        mv = _resolve_model(db, model_version)
+    except AppError as e:
+        if e.status_code != 404:
+            _persist_failure(
+                db,
+                request_id=request_id,
+                user_id=user.id,
+                upload_type=upload_type,
+                row_count=len(records),
+                filename=filename,
+                content_hash=content_hash,
+                model_version=model_version,
+                error_code=e.code,
+                error_message=e.message,
+            )
+        raise
+
+    try:
+        results, meta, latency_ms = run_inference(
+            records,
+            mv.version,
+            request_id=request_id,
+            preprocessing_version=mv.preprocessing_version,
+            artifact_sha256=mv.artifact_sha256,
+        )
+    except AppError as e:
+        _persist_failure(
+            db,
+            request_id=request_id,
+            user_id=user.id,
+            upload_type=upload_type,
+            row_count=len(records),
+            filename=filename,
+            content_hash=content_hash,
+            model_version=mv.version,
+            error_code=e.code,
+            error_message=e.message,
+        )
+        raise
+    except RuntimeError as e:
+        _persist_failure(
+            db,
+            request_id=request_id,
+            user_id=user.id,
+            upload_type=upload_type,
+            row_count=len(records),
+            filename=filename,
+            content_hash=content_hash,
+            model_version=mv.version,
+            error_code="INFERENCE_FAILED",
+            error_message=str(e),
+        )
+        raise AppError(
+            503,
+            "INFERENCE_FAILED",
+            "Model inference failed",
+            [{"message": str(e)}],
+        ) from e
+
+    upload = create_upload(
+        db,
+        user.id,
+        upload_type,
+        len(results),
+        filename=filename,
+        content_sha256=content_hash,
+        status="completed",
+    )
+    db.commit()
+    log_inference_success(
+        db,
+        request_id=request_id,
+        user_id=user.id,
+        upload_id=upload.id,
+        model_version=mv.version,
+        preprocessing_version=mv.preprocessing_version,
+        artifact_sha256=mv.artifact_sha256,
+        scaler_sha256=registry.scaler_sha256,
+        upload_type=upload_type,
+        results=results,
+        latency_ms=latency_ms,
+    )
+    return results, meta, upload.id
+
+
+def _prediction_body(meta: dict, row: dict, upload_id: int) -> dict:
+    return {
+        **meta,
+        "prediction": {
+            "label": row["label"],
+            "label_name": row["label_name"],
+            "probability_positive": row["probability_positive"],
+            "probability_negative": row["probability_negative"],
+            "confidence": row["confidence"],
+            "input_hash": row["input_hash"],
+            "input_echo": row["input_echo"],
+        },
+        "upload_id": upload_id,
+    }
 
 
 @router.post("")
@@ -72,60 +215,49 @@ def predict_single(
         )
         raise
 
-    version, mv = _resolve_model_version(db, model_version)
-    upload = create_upload(db, user.id, "single", 1, status="completed")
-    db.commit()
+    results, meta, upload_id = _run(db, user, [record], "single", model_version)
+    return _prediction_body(meta, results[0], upload_id)
 
+
+@router.post("/csv")
+async def predict_single_csv(
+    db: DbDep,
+    user: Annotated[User, Depends(get_current_user)],
+    model_version: str | None = Query(default=None),
+    file: UploadFile = File(...),
+):
+    """One CSV row. Same response as JSON single prediction, scored by the same resolved model."""
+    request_id = str(uuid.uuid4())
     try:
-        results, meta, latency_ms = run_inference([record], version)
-    except RuntimeError as e:
-        log_inference_error(
+        raw = await file.read()
+        records = validate_batch_csv(raw)
+        if len(records) != 1:
+            raise ValidationException(
+                "VALIDATION_ERROR",
+                "Single CSV must contain exactly one data row",
+                [{"message": f"row count {len(records)}"}],
+            )
+    except ValidationException as e:
+        log_validation_error(
             db,
             request_id=request_id,
             user_id=user.id,
-            upload_id=upload.id,
             upload_type="single",
-            error_code="INFERENCE_FAILED",
-            error_message=str(e),
-            model_version=version,
+            error_code=e.code,
+            error_message=e.message,
         )
-        raise AppError(
-            503,
-            "INFERENCE_FAILED",
-            "Model inference failed",
-            [{"message": str(e)}],
-        ) from e
+        raise
 
-    meta["request_id"] = request_id
-    meta["artifact_sha256"] = mv.artifact_sha256
-    log_inference_success(
+    results, meta, upload_id = _run(
         db,
-        request_id=request_id,
-        user_id=user.id,
-        upload_id=upload.id,
-        model_version=version,
-        preprocessing_version=mv.preprocessing_version,
-        artifact_sha256=mv.artifact_sha256,
-        scaler_sha256=registry.scaler_sha256,
-        upload_type="single",
-        results=results,
-        latency_ms=latency_ms,
+        user,
+        records,
+        "single",
+        model_version,
+        filename=file.filename,
+        content_hash=hash_bytes(raw),
     )
-
-    r = results[0]
-    return {
-        **meta,
-        "prediction": {
-            "label": r["label"],
-            "label_name": r["label_name"],
-            "probability_positive": r["probability_positive"],
-            "probability_negative": r["probability_negative"],
-            "confidence": r["confidence"],
-            "input_hash": r["input_hash"],
-            "input_echo": r["input_echo"],
-        },
-        "upload_id": upload.id,
-    }
+    return _prediction_body(meta, results[0], upload_id)
 
 
 @router.post("/batch")
@@ -155,56 +287,18 @@ async def predict_batch(
         )
         raise
 
-    version, mv = _resolve_model_version(db, model_version)
-    upload = create_upload(
+    results, meta, upload_id = _run(
         db,
-        user.id,
+        user,
+        records,
         "batch",
-        len(records),
+        model_version,
         filename=filename,
-        content_sha256=content_hash,
+        content_hash=content_hash,
     )
-    db.commit()
-
-    try:
-        results, meta, latency_ms = run_inference(records, version)
-    except RuntimeError as e:
-        log_inference_error(
-            db,
-            request_id=request_id,
-            user_id=user.id,
-            upload_id=upload.id,
-            upload_type="batch",
-            error_code="INFERENCE_FAILED",
-            error_message=str(e),
-            model_version=version,
-        )
-        raise AppError(
-            503,
-            "INFERENCE_FAILED",
-            "Model inference failed",
-            [{"message": str(e)}],
-        ) from e
-
-    meta["request_id"] = request_id
-    meta["artifact_sha256"] = mv.artifact_sha256
-    log_inference_success(
-        db,
-        request_id=request_id,
-        user_id=user.id,
-        upload_id=upload.id,
-        model_version=version,
-        preprocessing_version=mv.preprocessing_version,
-        artifact_sha256=mv.artifact_sha256,
-        scaler_sha256=registry.scaler_sha256,
-        upload_type="batch",
-        results=results,
-        latency_ms=latency_ms,
-    )
-
     return {
         **meta,
-        "upload_id": upload.id,
+        "upload_id": upload_id,
         "row_count": len(results),
         "predictions": results,
     }
@@ -231,49 +325,10 @@ def predict_batch_json(
         )
         raise
 
-    version, mv = _resolve_model_version(db, model_version)
-    upload = create_upload(db, user.id, "batch", len(records))
-    db.commit()
-
-    try:
-        results, meta, latency_ms = run_inference(records, version)
-    except RuntimeError as e:
-        log_inference_error(
-            db,
-            request_id=request_id,
-            user_id=user.id,
-            upload_id=upload.id,
-            upload_type="batch",
-            error_code="INFERENCE_FAILED",
-            error_message=str(e),
-            model_version=version,
-        )
-        raise AppError(
-            503,
-            "INFERENCE_FAILED",
-            "Model inference failed",
-            [{"message": str(e)}],
-        ) from e
-
-    meta["request_id"] = request_id
-    meta["artifact_sha256"] = mv.artifact_sha256
-    log_inference_success(
-        db,
-        request_id=request_id,
-        user_id=user.id,
-        upload_id=upload.id,
-        model_version=version,
-        preprocessing_version=mv.preprocessing_version,
-        artifact_sha256=mv.artifact_sha256,
-        scaler_sha256=registry.scaler_sha256,
-        upload_type="batch",
-        results=results,
-        latency_ms=latency_ms,
-    )
-
+    results, meta, upload_id = _run(db, user, records, "batch", model_version)
     return {
         **meta,
-        "upload_id": upload.id,
+        "upload_id": upload_id,
         "row_count": len(results),
         "predictions": results,
     }

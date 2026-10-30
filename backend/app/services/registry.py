@@ -140,6 +140,22 @@ class ModelRegistry:
             raise AppError(404, "MODEL_NOT_FOUND", f"Model version {version} is not registered", [])
         return self._adapters[version]
 
+    def ensure_ready(self, version: str) -> ModelAdapter:
+        """Scaler and this version's weights must both be loaded before inference."""
+        if self._scaler is None:
+            raise AppError(503, "MODEL_UNAVAILABLE", "Preprocessing scaler is not loaded", [])
+        try:
+            return self.get_adapter(version)
+        except AppError as e:
+            if e.status_code == 404:
+                raise AppError(
+                    503,
+                    "MODEL_UNAVAILABLE",
+                    f"Model version {version} is registered but not loaded",
+                    [],
+                ) from e
+            raise
+
     def register_fake(self, version: str, adapter: ModelAdapter) -> None:
         """For tests only."""
         self._adapters[version] = adapter

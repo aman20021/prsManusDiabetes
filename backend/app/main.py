@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response
 
-from app.api import auth, models, monitoring, predict, predictions, uploads
+from app.api import auth, models, monitoring, predict, predictions, uploads, users
 from app.config import get_settings
 from app.db.base import Base
 from app.db.seed import seed_model_versions, seed_roles_and_users
@@ -35,6 +35,7 @@ app.add_exception_handler(ValidationException, validation_exception_handler)
 app.add_exception_handler(AppError, app_error_handler)
 
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(users.router, prefix="/api/v1")
 app.include_router(predict.router, prefix="/api/v1")
 app.include_router(uploads.router, prefix="/api/v1")
 app.include_router(predictions.router, prefix="/api/v1")

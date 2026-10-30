@@ -96,7 +96,7 @@ Run: `cd backend && TESTING=1 pytest -q`
 
 ## Promotion / rollback (operational)
 
-1. New artifact lands in `models/candidates/` and is registered as `candidate`.
+1. The new artifact file is stored under `backend/models/artifacts/` and registered with status `candidate` (the production row is unchanged).
 2. Run `python scripts/evaluate_candidate.py --candidate vX --csv eval.csv`.
 3. MLOps reviews metrics comparison in DB/UI.
 4. `POST …/promote` with reason → old production `retired`, candidate `production`.

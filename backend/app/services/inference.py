@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import time
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
 
-from app.config import get_settings
 from app.domain.features import LABEL_NAMES
 from app.services.hashing import canonical_input_hash
 from app.services.registry import registry
@@ -20,10 +18,14 @@ def _utc_now() -> datetime:
 def run_inference(
     records: list[dict[str, int]],
     model_version: str,
+    *,
+    request_id: str,
+    preprocessing_version: str,
+    artifact_sha256: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], float]:
-    settings = get_settings()
+    """Run the already-resolved model. Metadata comes from that version, not a later guess."""
     scaler = registry.get_scaler()
-    adapter = registry.get_adapter(model_version)
+    adapter = registry.ensure_ready(model_version)
 
     start = time.perf_counter()
     try:
@@ -57,10 +59,11 @@ def run_inference(
         )
 
     meta = {
-        "request_id": str(uuid.uuid4()),
+        "request_id": request_id,
         "timestamp": _utc_now().isoformat(),
         "model_version": model_version,
-        "preprocessing_version": settings.preprocessing_version,
+        "preprocessing_version": preprocessing_version,
+        "artifact_sha256": artifact_sha256,
         "scaler_sha256": registry.scaler_sha256,
         "disclaimer": "Assistive screening tool only; not a clinical diagnosis.",
     }

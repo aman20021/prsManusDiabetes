@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -65,12 +66,26 @@ def metrics(y_true: list[int], y_pred: list[int]) -> dict:
     }
 
 
+def _score(records: list[dict], mv: ModelVersion) -> list[dict]:
+    results, _, _ = run_inference(
+        records,
+        mv.version,
+        request_id=str(uuid.uuid4()),
+        preprocessing_version=mv.preprocessing_version,
+        artifact_sha256=mv.artifact_sha256,
+    )
+    return results
+
+
 def evaluate(db: Session, candidate_version: str, csv_path: Path) -> dict:
     bootstrap_artifacts()
     prod = get_active_model_version(db)
     records, labels = load_labelled_csv(csv_path)
+    candidate = db.query(ModelVersion).filter_by(version=candidate_version).first()
+    if not candidate:
+        raise ValueError(f"Candidate {candidate_version} is not registered")
 
-    cand_results, _, _ = run_inference(records, candidate_version)
+    cand_results = _score(records, candidate)
     cand_pred = [r["label"] for r in cand_results]
     cand_metrics = metrics(labels, cand_pred)
     cand_metrics["role"] = "candidate"
@@ -78,20 +93,19 @@ def evaluate(db: Session, candidate_version: str, csv_path: Path) -> dict:
 
     comparison = {"candidate": cand_metrics}
     if prod:
-        prod_results, _, _ = run_inference(records, prod.version)
+        prod_results = _score(records, prod)
         prod_pred = [r["label"] for r in prod_results]
         pm = metrics(labels, prod_pred)
         pm["role"] = "production"
         pm["version"] = prod.version
         comparison["production"] = pm
 
-    mv = db.query(ModelVersion).filter_by(version=candidate_version).first()
-    if mv:
-        existing = mv.offline_metrics or {}
-        existing.update(cand_metrics)
-        existing["comparison"] = comparison
-        mv.offline_metrics = existing
-        db.commit()
+    candidate.offline_metrics = {
+        **(candidate.offline_metrics or {}),
+        **cand_metrics,
+        "comparison": comparison,
+    }
+    db.commit()
     return comparison
 
 
